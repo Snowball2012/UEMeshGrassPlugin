@@ -1,0 +1,39 @@
+﻿#include "/Engine/Private/Common.ush"
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+struct FMGGrassScatterInterpolantsVSToPS
+{
+	float4 Position : SV_POSITION;
+	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
+};
+
+#if VERTEXSHADER
+
+void GrassScatterVS(
+	FVertexFactoryInput Input,
+	out FMGGrassScatterInterpolantsVSToPS Output
+	)
+{
+	ResolvedView = ResolveView();
+
+	FVertexFactoryIntermediates VFIntermediates = GetVertexFactoryIntermediates(Input);
+	float4 WorldPosition = VertexFactoryGetWorldPosition(Input, VFIntermediates);
+	half3x3 TangentToLocal = VertexFactoryGetTangentToLocal(Input, VFIntermediates);
+	
+	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentToLocal);
+	
+	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
+	Output.Position = float4(0,0,0,1);
+}
+
+#elif PIXELSHADER
+
+void GrassScatterPS( 
+	FMGGrassScatterInterpolantsVSToPS Interpolants
+	OPTIONAL_IsFrontFace
+	)
+{
+}
+
+#endif
