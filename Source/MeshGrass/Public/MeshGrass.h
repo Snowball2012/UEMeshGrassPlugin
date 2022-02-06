@@ -19,8 +19,14 @@ class UMGMeshGrass : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 
+private:
+	static FGlobalDynamicIndexBuffer DynamicIndexBuffer;
+	static FGlobalDynamicVertexBuffer DynamicVertexBuffer;
+	static TGlobalResource<FGlobalDynamicReadBuffer> DynamicReadBuffer;
+
 public:
 
-	UFUNCTION(Category="MeshGrass")
+	UFUNCTION(BlueprintCallable, Category="MeshGrass")
 	static bool RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTextureRenderTarget2D* RT);
+	
 };

@@ -4,6 +4,7 @@
 #include "Interfaces/IPluginManager.h"
 #include "MeshMaterialShader.h"
 #include "MeshPassProcessor.h"
+#include "MeshPassProcessor.inl"
 
 #define LOCTEXT_NAMESPACE "FMeshGrass"
 
@@ -73,6 +74,105 @@ class FMGMeshCollector : public FMeshElementCollector
 {
 public:
 	FMGMeshCollector() : FMeshElementCollector(GMaxRHIFeatureLevel) {}
+
+	void ClearViewMeshArrays() { FMeshElementCollector::ClearViewMeshArrays(); }
+
+	void AddViewMeshArrays(
+		FSceneView* InView, 
+		TArray<FMeshBatchAndRelevance,SceneRenderingAllocator>* ViewMeshes,
+		FSimpleElementCollector* ViewSimpleElementCollector, 
+		FGPUScenePrimitiveCollector* InDynamicPrimitiveCollector,
+		ERHIFeatureLevel::Type InFeatureLevel,
+		FGlobalDynamicIndexBuffer* InDynamicIndexBuffer,
+		FGlobalDynamicVertexBuffer* InDynamicVertexBuffer,
+		FGlobalDynamicReadBuffer* InDynamicReadBuffer)
+	{
+		FMeshElementCollector::AddViewMeshArrays(InView, ViewMeshes, ViewSimpleElementCollector,
+			InDynamicPrimitiveCollector, InFeatureLevel, InDynamicIndexBuffer, InDynamicVertexBuffer,
+			InDynamicReadBuffer);
+	}
+
+	void SetPrimitive(const FPrimitiveSceneProxy* InPrimitiveSceneProxy, FHitProxyId DefaultHitProxyId)
+	{
+		FMeshElementCollector::SetPrimitive(InPrimitiveSceneProxy, DefaultHitProxyId);
+	}
+	
+};
+
+FGlobalDynamicIndexBuffer UMGMeshGrass::DynamicIndexBuffer;
+FGlobalDynamicVertexBuffer UMGMeshGrass::DynamicVertexBuffer;
+TGlobalResource<FGlobalDynamicReadBuffer> UMGMeshGrass::DynamicReadBuffer;
+
+class FMGScatterGrassMeshPassProcessor : public FMeshPassProcessor
+{
+private:
+	FMeshPassProcessorRenderState DrawRenderState;
+	
+public:
+	FMGScatterGrassMeshPassProcessor(
+		const FScene* InScene,
+		const FSceneView* InView,
+		FMeshPassDrawListContext* InDrawListContext
+	)
+		: FMeshPassProcessor(InScene, InView->GetFeatureLevel(), InView, InDrawListContext)
+	{
+		DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
+		DrawRenderState.SetBlendState(TStaticBlendState<>::GetRHI());
+	}
+
+	virtual void AddMeshBatch(const FMeshBatch& RESTRICT MeshBatch, uint64 BatchElementMask, const FPrimitiveSceneProxy* RESTRICT PrimitiveSceneProxy, int32 StaticMeshId = -1) override final
+	{
+		const FMaterialRenderProxy* FallbackMaterialRenderProxyPtr = nullptr;
+		const FMaterial& Material = MeshBatch.MaterialRenderProxy->GetMaterialWithFallback(FeatureLevel, FallbackMaterialRenderProxyPtr);
+		const FMaterialRenderProxy& MaterialRenderProxy = FallbackMaterialRenderProxyPtr ? *FallbackMaterialRenderProxyPtr : *MeshBatch.MaterialRenderProxy;
+
+		if (MeshBatch.bUseForMaterial
+			&& (!PrimitiveSceneProxy || PrimitiveSceneProxy->ShouldRenderInMainPass()))
+		{
+			Process(MeshBatch, BatchElementMask, StaticMeshId, PrimitiveSceneProxy, MaterialRenderProxy, Material);
+		}
+	}
+
+private:
+	void Process(
+		const FMeshBatch& MeshBatch,
+		uint64 BatchElementMask,
+		int32 StaticMeshId,
+		const FPrimitiveSceneProxy* RESTRICT PrimitiveSceneProxy,
+		const FMaterialRenderProxy& RESTRICT MaterialRenderProxy,
+		const FMaterial& RESTRICT MaterialResource)
+	{
+		const FVertexFactory* VertexFactory = MeshBatch.VertexFactory;
+
+		TMeshProcessorShaders<
+			FMGGrassScatterShaderVS,
+			FMGGrassScatterShaderPS> Shaders;
+
+		Shaders.VertexShader = MaterialResource.GetShader<FMGGrassScatterShaderVS>(VertexFactory->GetType());
+		Shaders.PixelShader = MaterialResource.GetShader<FMGGrassScatterShaderPS>(VertexFactory->GetType());
+		const FMeshDrawingPolicyOverrideSettings OverrideSettings = ComputeMeshOverrideSettings(MeshBatch);
+		ERasterizerFillMode MeshFillMode = ComputeMeshFillMode(MeshBatch, MaterialResource, OverrideSettings);
+		ERasterizerCullMode MeshCullMode = CM_None;
+
+		FMeshMaterialShaderElementData ShaderElementData;
+		ShaderElementData.InitializeMeshMaterialData(ViewIfDynamicMeshCommand, PrimitiveSceneProxy, MeshBatch, StaticMeshId, false);
+		
+		FMeshDrawCommandSortKey SortKey {};
+
+		BuildMeshDrawCommands(
+			MeshBatch,
+			BatchElementMask,
+			PrimitiveSceneProxy,
+			MaterialRenderProxy,
+			MaterialResource,
+			DrawRenderState,
+			Shaders,
+			MeshFillMode,
+			MeshCullMode,
+			SortKey,
+			EMeshPassFeatures::Default,
+			ShaderElementData);
+	}
 };
 
 bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTextureRenderTarget2D* RT)
@@ -86,16 +186,11 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 
 	ENQUEUE_RENDER_COMMAND(RenderMeshGrassToRT)([SceneProxy, RT](auto& RHICmdList)
 	{
-		FRDGBuilder GraphBuilder(RHICmdList);
-		auto* PassParameters = GraphBuilder.AllocParameters<FMGGrassScatterPassParameters>();
-
-		// Render targets
+		// Init RT
 		FTextureRenderTargetResource* RTRes = RT->GetRenderTargetResource();
 		TRefCountPtr<IPooledRenderTarget> RTPooled = CreateRenderTarget(RTRes->GetTextureRenderTarget2DResource()->GetTextureRHI(), TEXT("GrassScatterRT"));
-		FRDGTextureRef RTRef = GraphBuilder.RegisterExternalTexture(RTPooled, TEXT("GrassScatterRDG"));
-		PassParameters->RenderTargets[0] = FRenderTargetBinding(RTRef, ERenderTargetLoadAction::EClear);
-
-		// View
+		
+		// Create view
 		FSceneViewFamilyContext ViewFamily(
 			FSceneViewFamily::ConstructionValues(RTRes, &SceneProxy->GetScene(),
 				FEngineShowFlags(ESFIM_Editor)).SetWorldTimes(
@@ -113,26 +208,58 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 		
 		GetRendererModule().CreateAndInitSingleView(RHICmdList, &ViewFamily, &ViewInitOptions);
 		const FSceneView* View = ViewFamily.Views[0];
+
+		// Gather mesh batches		
+		TArray<FMeshBatchAndRelevance,SceneRenderingAllocator> OutDynamicMeshElements;
+		
+		// Simple elements not supported in mesh grass passes
+		FSimpleElementCollector DynamicSubjectSimpleElements;
+
+		FMemMark Mark(FMemStack::Get());
+		FMGMeshCollector Collector;
+		Collector.ClearViewMeshArrays();
+
+		// Not sure if const_cast is legal here...
+		Collector.AddViewMeshArrays(const_cast<FSceneView*>(View), &OutDynamicMeshElements, &DynamicSubjectSimpleElements,
+			nullptr, GMaxRHIFeatureLevel, &DynamicIndexBuffer, &DynamicVertexBuffer, &DynamicReadBuffer);
+
+		// We dont need a hit proxy here
+		Collector.SetPrimitive(SceneProxy, FHitProxyId());
+		SceneProxy->GetDynamicMeshElements(ViewFamily.Views, ViewFamily, ~0x0u, Collector);
+		
+		FRDGBuilder GraphBuilder(RHICmdList);
+		auto* PassParameters = GraphBuilder.AllocParameters<FMGGrassScatterPassParameters>();
+
+		// Render targets
+		FRDGTextureRef RTRef = GraphBuilder.RegisterExternalTexture(RTPooled, TEXT("GrassScatterRDG"));
+		PassParameters->RenderTargets[0] = FRenderTargetBinding(RTRef, ERenderTargetLoadAction::EClear);
+
+		// View
 		PassParameters->View = View->ViewUniformBuffer;
 
-		FMGMeshCollector Collector;
-		SceneProxy->GetDynamicMeshElements(ViewFamily.Views, ViewFamily, ~0x0u, Collector);
-
-		GraphBuilder.AddPass(
-			RDG_EVENT_NAME("ScatterMeshGrass"),
-			PassParameters,
-			ERDGPassFlags::Raster, [SceneProxy](FRHICommandListImmediate& RHIPassCmdList)
-			{
-				FMemMark Mark(FMemStack::Get());
-
-				FDynamicMeshDrawCommandStorage DynamicMeshDrawCommandStorage;
-				FMeshCommandOneFrameArray VisibleMeshDrawCommands;
-				FGraphicsMinimalPipelineStateSet GraphicsMinimalPipelineStateSet;
-				bool NeedsShaderInitialization = false;
-
-			});
-		
+		if (OutDynamicMeshElements.Num() > 0)
+		{
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("ScatterMeshGrass"),
+				PassParameters,
+				ERDGPassFlags::Raster, [SceneProxy, View, &OutDynamicMeshElements](FRHICommandListImmediate& RHIPassCmdList)
+				{
+					DrawDynamicMeshPass(*View, RHIPassCmdList, [&](FDynamicPassMeshDrawListContext* DynamicMeshPassContext)
+					{
+						FMGScatterGrassMeshPassProcessor MeshProcessor(
+							View->Family->Scene->GetRenderScene(),
+							View,
+							DynamicMeshPassContext);
+					
+						MeshProcessor.AddMeshBatch(*OutDynamicMeshElements[0].Mesh, ~0ull, OutDynamicMeshElements[0].PrimitiveSceneProxy);
+					});
+				});
+		}
 		GraphBuilder.SetTextureAccessFinal(RTRef, ERHIAccess::SRVGraphics);
+		// Global dynamic buffers need to be committed before rendering.
+		DynamicIndexBuffer.Commit();
+		DynamicVertexBuffer.Commit();
+		DynamicReadBuffer.Commit();
 		GraphBuilder.Execute();
 	});	
 	
