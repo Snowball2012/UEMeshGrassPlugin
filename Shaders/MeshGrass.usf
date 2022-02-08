@@ -24,16 +24,23 @@ void GrassScatterVS(
 	FMaterialVertexParameters VertexParameters = GetMaterialVertexParameters(Input, VFIntermediates, WorldPosition.xyz, TangentToLocal);
 	
 	Output.FactoryInterpolants = VertexFactoryGetInterpolantsVSToPS(Input, VFIntermediates, VertexParameters);
-	Output.Position = float4(0,0,0,1);
+	{
+		WorldPosition.xyz += GetMaterialWorldPositionOffset(VertexParameters);
+	}
+	float4 RasterizedWorldPosition = VertexFactoryGetRasterizedWorldPosition(Input, VFIntermediates, WorldPosition);
+	float4 ScreenPos = mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip);
+	
+	Output.Position = ScreenPos;
 }
 
 #elif PIXELSHADER
 
-void GrassScatterPS( 
+float4 GrassScatterPS( 
 	FMGGrassScatterInterpolantsVSToPS Interpolants
 	OPTIONAL_IsFrontFace
-	)
+	) : SV_Target0
 {
+	return float4(0,1,0,1);
 }
 
 #endif

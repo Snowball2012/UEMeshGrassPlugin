@@ -191,9 +191,12 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 		TRefCountPtr<IPooledRenderTarget> RTPooled = CreateRenderTarget(RTRes->GetTextureRenderTarget2DResource()->GetTextureRHI(), TEXT("GrassScatterRT"));
 		
 		// Create view
+		FEngineShowFlags ViewShowFlags(ESFIM_Editor);
+		// Force GetDynamicMeshElements to collect meshes in this view
+		ViewShowFlags.SetLighting(false);
 		FSceneViewFamilyContext ViewFamily(
 			FSceneViewFamily::ConstructionValues(RTRes, &SceneProxy->GetScene(),
-				FEngineShowFlags(ESFIM_Editor)).SetWorldTimes(
+				ViewShowFlags).SetWorldTimes(
 					FApp::GetCurrentTime() - GStartTime,
 					FApp::GetDeltaTime(),
 					FApp::GetCurrentTime() - GStartTime));
