@@ -204,9 +204,20 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 		const auto& Bounds = SceneProxy->GetBounds();
 		FSceneViewInitOptions ViewInitOptions;
 		ViewInitOptions.SetViewRectangle(FIntRect(0,0, RTRes->GetSizeX(), RTRes->GetSizeY()));
-		ViewInitOptions.ViewOrigin = FVector(Bounds.Origin);
-		ViewInitOptions.ViewRotationMatrix = FLookAtMatrix(Bounds.Origin + Bounds.SphereRadius*FVector::UpVector, Bounds.Origin, FVector::YAxisVector);
-		ViewInitOptions.ProjectionMatrix = FReversedZOrthoMatrix(Bounds.BoxExtent.X * 2, Bounds.BoxExtent.Y * 2, Bounds.BoxExtent.Z * 2, 0);
+		ViewInitOptions.ViewOrigin = Bounds.Origin;
+		ViewInitOptions.ViewRotationMatrix = FRotationMatrix::MakeFromXZ(FVector::XAxisVector, Bounds.SphereRadius*FVector::ZAxisVector);
+		
+		const float NearPlane = 0;
+		const float FarPlane = Bounds.BoxExtent.Z * 2 + KINDA_SMALL_NUMBER;
+
+		const float ZScale = 1.0f / (FarPlane - NearPlane);
+		const float ZOffset = -NearPlane;
+		
+		ViewInitOptions.ProjectionMatrix = FReversedZOrthoMatrix(
+			Bounds.BoxExtent.X,
+			Bounds.BoxExtent.Y,
+			ZScale,
+			ZOffset);
 		ViewInitOptions.ViewFamily = &ViewFamily;
 		
 		GetRendererModule().CreateAndInitSingleView(RHICmdList, &ViewFamily, &ViewInitOptions);

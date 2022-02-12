@@ -40,7 +40,26 @@ float4 GrassScatterPS(
 	OPTIONAL_IsFrontFace
 	) : SV_Target0
 {
-	return float4(0,1,0,1);
+	ResolvedView = ResolveView();
+
+	FMaterialPixelParameters MaterialParameters = GetMaterialPixelParameters(Interpolants.FactoryInterpolants, Interpolants.Position);
+	FPixelMaterialInputs PixelMaterialInputs;
+	CalcMaterialParameters(MaterialParameters, PixelMaterialInputs, Interpolants.Position, bIsFrontFace);
+
+	float4 OutColor = 0;
+#if NUM_MATERIAL_OUTPUTS_GETGRASSWEIGHT > 0
+	OutColor.x = GetGrassWeight0(MaterialParameters);
+#if NUM_MATERIAL_OUTPUTS_GETGRASSWEIGHT > 1
+	OutColor.y = GetGrassWeight1(MaterialParameters);
+#if NUM_MATERIAL_OUTPUTS_GETGRASSWEIGHT > 2
+	OutColor.z = GetGrassWeight2(MaterialParameters);
+#if NUM_MATERIAL_OUTPUTS_GETGRASSWEIGHT > 3
+	OutColor.w = GetGrassWeight3(MaterialParameters);
+#endif
+#endif
+#endif
+#endif
+	return OutColor;
 }
 
 #endif
