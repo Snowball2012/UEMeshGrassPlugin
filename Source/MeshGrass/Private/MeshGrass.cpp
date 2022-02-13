@@ -8,8 +8,17 @@
 
 #define LOCTEXT_NAMESPACE "FMeshGrass"
 
+struct FMGGrassInstanceData // keep this in sync with FMGGrassInstanceData in MeshGrass.usf
+{
+	FVector WorldPosition;
+	FVector WorldNormal;
+};
+
 BEGIN_SHADER_PARAMETER_STRUCT(FMGGrassScatterPassParameters, )
 SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, AtomicWriteCounter)
+SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FMGGrassInstanceData>, OutGrassInstances)
+SHADER_PARAMETER(uint32, OutGrassIndexMask)
 RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
@@ -32,6 +41,7 @@ public:
 class FMGGrassScatterShaderPS : public FMeshMaterialShader
 {
 	DECLARE_SHADER_TYPE(FMGGrassScatterShaderPS, MeshMaterial);
+	
 public:
 	FMGGrassScatterShaderPS() = default;
 
@@ -43,8 +53,8 @@ public:
 	static bool ShouldCompilePermutation(const FMeshMaterialShaderPermutationParameters& Parameters);
 };
 
-IMPLEMENT_SHADER_TYPE(,FMGGrassScatterShaderVS,TEXT("/Plugin/MeshGrass/MeshGrass.usf"),TEXT("GrassScatterVS"),SF_Vertex);
-IMPLEMENT_SHADER_TYPE(,FMGGrassScatterShaderPS,TEXT("/Plugin/MeshGrass/MeshGrass.usf"),TEXT("GrassScatterPS"),SF_Pixel);
+IMPLEMENT_MATERIAL_SHADER_TYPE(,FMGGrassScatterShaderVS,TEXT("/Plugin/MeshGrass/MeshGrass.usf"),TEXT("GrassScatterVS"),SF_Vertex);
+IMPLEMENT_MATERIAL_SHADER_TYPE(,FMGGrassScatterShaderPS,TEXT("/Plugin/MeshGrass/MeshGrass.usf"),TEXT("GrassScatterPS"),SF_Pixel);
 
 bool FMGGrassScatterShaderVS::ShouldCompilePermutation(const FMeshMaterialShaderPermutationParameters& Parameters)
 {
@@ -248,6 +258,26 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 		FRDGTextureRef RTRef = GraphBuilder.RegisterExternalTexture(RTPooled, TEXT("GrassScatterRDG"));
 		PassParameters->RenderTargets[0] = FRenderTargetBinding(RTRef, ERenderTargetLoadAction::EClear);
 
+		// Shader params
+		// Atomic counter
+		auto AtomicDesc = FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), 1);
+		AtomicDesc.Usage |= BUF_SourceCopy;
+		FRDGBufferRef AtomicBuffer = GraphBuilder.CreateBuffer(
+			AtomicDesc,
+			TEXT("GrassInstanceAtomicCounter"));
+		PassParameters->AtomicWriteCounter = GraphBuilder.CreateUAV(AtomicBuffer, PF_R32_UINT);
+		AddClearUAVPass(GraphBuilder, PassParameters->AtomicWriteCounter, 0);
+
+		// Output array
+		auto Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FMGGrassInstanceData), 512*512);
+		Desc.Usage |= BUF_SourceCopy;
+		FRDGBufferRef OutputBuffer = GraphBuilder.CreateBuffer(
+			Desc,
+			TEXT("GrassInstances"));
+		PassParameters->OutGrassInstances = GraphBuilder.CreateUAV(OutputBuffer);
+		PassParameters->OutGrassIndexMask = (2 << 18) - 1;
+
+
 		// View
 		PassParameters->View = View->ViewUniformBuffer;
 
@@ -256,7 +286,7 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("ScatterMeshGrass"),
 				PassParameters,
-				ERDGPassFlags::Raster, [SceneProxy, View, &OutDynamicMeshElements](FRHICommandListImmediate& RHIPassCmdList)
+				ERDGPassFlags::Raster, [PassParameters, SceneProxy, View, &OutDynamicMeshElements](FRHICommandListImmediate& RHIPassCmdList)
 				{
 					DrawDynamicMeshPass(*View, RHIPassCmdList, [&](FDynamicPassMeshDrawListContext* DynamicMeshPassContext)
 					{
@@ -269,12 +299,48 @@ bool UMGMeshGrass::RenderComponentToGrassMap(UPrimitiveComponent* Comp, UTexture
 					});
 				});
 		}
+
+		FRHIGPUBufferReadback ReadbackBuffer(TEXT("MeshGrassReadback"));
+
+		AddReadbackBufferPass(GraphBuilder, RDG_EVENT_NAME("Readback"), OutputBuffer,
+		[&ReadbackBuffer, OutputBuffer](FRHICommandListImmediate& RHIPassCmdList)
+		{
+			ReadbackBuffer.EnqueueCopy(RHIPassCmdList, OutputBuffer->GetRHI(), 0u);
+			RHIPassCmdList.BlockUntilGPUIdle();
+			check(ReadbackBuffer.IsReady());
+		});
+
+		FRHIGPUBufferReadback ReadbackAtomicBuffer(TEXT("AtomicReadback"));
+		AddReadbackBufferPass(GraphBuilder, RDG_EVENT_NAME("AtomicReadback"), AtomicBuffer,
+		[&ReadbackAtomicBuffer, AtomicBuffer](FRHICommandListImmediate& RHIPassCmdList)
+		{
+			ReadbackAtomicBuffer.EnqueueCopy(RHIPassCmdList, AtomicBuffer->GetRHI(), 0u);
+			RHIPassCmdList.BlockUntilGPUIdle();
+			check(ReadbackAtomicBuffer.IsReady());
+		});
 		GraphBuilder.SetTextureAccessFinal(RTRef, ERHIAccess::SRVGraphics);
 		// Global dynamic buffers need to be committed before rendering.
 		DynamicIndexBuffer.Commit();
 		DynamicVertexBuffer.Commit();
 		DynamicReadBuffer.Commit();
 		GraphBuilder.Execute();
+
+		bool wrk = true;
+		if (wrk)
+		{
+			uint32* BufLocked = (uint32*)ReadbackAtomicBuffer.Lock(4);
+			UE_LOG(LogTemp, Warning, TEXT("AtomicCounter = %ld"), *BufLocked);
+			ReadbackAtomicBuffer.Unlock();
+
+			FMGGrassInstanceData* BufStructuredLocked = (FMGGrassInstanceData*)ReadbackBuffer.Lock(sizeof(FMGGrassInstanceData));
+			UE_LOG(LogTemp, Warning, TEXT("WorldPos = %f %f %f"),
+				BufStructuredLocked->WorldPosition.X,
+				BufStructuredLocked->WorldPosition.Y,
+				BufStructuredLocked->WorldPosition.Z);
+			ReadbackBuffer.Unlock();
+		}
+
+		
 	});	
 	
 	return true;

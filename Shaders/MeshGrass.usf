@@ -2,9 +2,20 @@
 #include "/Engine/Generated/Material.ush"
 #include "/Engine/Generated/VertexFactory.ush"
 
+globallycoherent RWBuffer<uint> AtomicWriteCounter;
+
+struct FMGGrassInstanceData
+{
+	float3 WorldPosition;
+	float3 WorldNormal;
+};
+RWStructuredBuffer<FMGGrassInstanceData> OutGrassInstances;
+uint OutGrassIndexMask;
+
 struct FMGGrassScatterInterpolantsVSToPS
 {
 	float4 Position : SV_POSITION;
+	float4 WorldPosition : POSITION1;
 	FVertexFactoryInterpolantsVSToPS FactoryInterpolants;
 };
 
@@ -31,6 +42,7 @@ void GrassScatterVS(
 	float4 ScreenPos = mul(RasterizedWorldPosition, ResolvedView.TranslatedWorldToClip);
 	
 	Output.Position = ScreenPos;
+	Output.WorldPosition = WorldPosition;
 }
 
 #elif PIXELSHADER
@@ -58,6 +70,18 @@ float4 GrassScatterPS(
 #endif
 #endif
 #endif
+
+	//if (OutColor.x > 0.5f)
+	//{
+		uint WriteIdx;
+		InterlockedAdd(AtomicWriteCounter[0], 1U, WriteIdx);
+
+		FMGGrassInstanceData GrassInstance;
+		GrassInstance.WorldPosition = Interpolants.WorldPosition;
+		GrassInstance.WorldNormal = PixelMaterialInputs.Normal;
+		
+		OutGrassInstances[WriteIdx & OutGrassIndexMask] = GrassInstance;
+	//}
 #endif
 	return OutColor;
 }
